@@ -1,0 +1,130 @@
+import os
+import requests
+import pandas as pd
+import plotly.graph_objs as go
+from plotly.subplots import make_subplots
+from datetime import datetime
+
+# EIA API key
+api_key = '  ' #Insert you API Key
+
+# API URL for Petroleum Summary Weekly Supply Estimates 
+url = 'https://api.eia.gov/v2/petroleum/sum/sndw/data/'
+
+# Fetch data with pagination for days supplied
+def fetch_days_supplied(api_key, url, start_date, end_date):
+    headers = {
+        'X-API-KEY': api_key,
+        'accept': 'application/json',
+    }
+
+    # Initialize parameters for days supplied, with process and product facets
+    params = {
+        'frequency': 'weekly',
+        'data[0]': 'value',
+        'facets[process][]': 'VSD',  # Process for Days Supplied
+        'facets[product][]': 'EPM0',  # Product for motor gasoline or appropriate product
+        'sort[0][column]': 'period',
+        'sort[0][direction]': 'desc',
+        'offset': '0',
+        'length': '5000',
+        'start': start_date,
+        'end': end_date
+    }
+
+    # Initialize data collection
+    all_data = []
+
+    while True:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        data = response.json()
+
+        if 'data' in data['response']:
+            all_data.extend(data['response']['data'])
+        else:
+            print("No data available for the specified parameters.")
+            break
+
+        # Check if we received less than 5000 records, indicating the last page
+        if len(data['response']['data']) < 5000:
+            break
+
+        # Increase the offset to fetch the next set of data
+        params['offset'] = str(int(params['offset']) + 5000)
+
+    return all_data
+
+# Fetch days supplied data
+start_date = '2019-01-01'
+end_date = datetime.now().strftime('%Y-%m-%d')
+days_supplied_data = fetch_days_supplied(api_key, url, start_date, end_date)
+
+# Convert data to DataFrame
+days_supplied_df = pd.DataFrame(days_supplied_data)
+print(days_supplied_df.columns)  # Verify columns
+
+# Ensure 'period' column exists and convert to datetime
+if 'period' in days_supplied_df.columns:
+    days_supplied_df['period'] = pd.to_datetime(days_supplied_df['period'])
+else:
+    print("The 'period' column is missing.")
+    exit(1)
+
+# Filter data to include all of 2019 and subsequent years
+days_supplied_df = days_supplied_df[days_supplied_df['period'] >= start_date]
+
+# Ensure 'value' is numeric
+days_supplied_df['value'] = pd.to_numeric(days_supplied_df['value'], errors='coerce')
+
+# Drop rows with NaN 'value'
+days_supplied_df = days_supplied_df.dropna(subset=['value'])
+
+# Extract year and month for grouping
+days_supplied_df['year'] = days_supplied_df['period'].dt.year
+days_supplied_df['month'] = days_supplied_df['period'].dt.month
+
+# Aggregate data by year and month using average instead of sum
+monthly_days_supplied = days_supplied_df.groupby(['year', 'month'])['value'].mean().reset_index()
+
+# Pivot data to have years as columns
+days_supplied_pivot = monthly_days_supplied.pivot(index='month', columns='year', values='value')
+
+# Remove zero values for cleaner plotting
+days_supplied_pivot = days_supplied_pivot[days_supplied_pivot > 0].dropna(how='all')
+
+# Function to generate a year-over-year Plotly figure for days supplied
+def create_yoy_plot(data, title, value_col):
+    fig = make_subplots(rows=1, cols=1)
+    for year in data.columns:
+        fig.add_trace(go.Scatter(
+            x=data.index,
+            y=data[year],
+            mode='lines+markers',
+            name=str(year)
+        ))
+    fig.update_layout(
+        title=title,
+        xaxis=dict(
+            tickmode='array',
+            tickvals=list(range(1, 13)),
+            ticktext=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        ),
+        yaxis_title=value_col,
+        hovermode="x unified"
+    )
+    return fig
+
+# Create a plot for days supplied
+days_supplied_fig = create_yoy_plot(days_supplied_pivot, 'Year-Over-Year Days Supplied', 'Days Supplied')
+
+# Display the days supplied figure
+days_supplied_fig.show()
+
+# Ensure directory exists before saving files
+output_dir = '' #add file path
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+
+# Save the days supplied chart as HTML
+days_supplied_fig.write_html(os.path.join(output_dir, 'Days_Supplied_YearOverYear.html'))
