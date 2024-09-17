@@ -1,0 +1,271 @@
+# Import necessary libraries
+import os
+import requests
+import pandas as pd
+import plotly.graph_objs as go
+from plotly.subplots import make_subplots
+from datetime import datetime
+
+# Your EIA API key
+api_key = '  ' #add API KEY
+
+# API URL for Petroleum Summary Weekly Supply Estimates 
+url = 'https://api.eia.gov/v2/petroleum/sum/sndw/data/'
+
+# Function to fetch data for a specific product
+def fetch_stocks(api_key, url, start_date, end_date, process_code, product_code, duoarea_code):
+    headers = {
+        'X-API-KEY': api_key,
+        'accept': 'application/json',
+    }
+    
+    # Initialize parameters for exports, with process and product facets
+    params = {
+        'frequency': 'weekly',
+        'data[0]': 'value',
+        'facets[process][]': process_code,  # Process for Ending Stocks Excluding
+        'facets[product][]': product_code,  # Product for Crude, Gasoline, Ethanol, Distillate, Resid
+        'facets[duoarea][]': duoarea_code,  # duoarea_code for padds NUS = US 
+        'sort[0][column]': 'period',
+        'sort[0][direction]': 'desc',
+        'offset': '0',
+        'length': '5000',
+        'start': start_date,
+        'end': end_date
+    }
+
+    # Initialize data collection
+    all_data = []
+
+    while True:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        data = response.json()
+
+        if 'data' in data['response']:
+            all_data.extend(data['response']['data'])
+        else:
+            print("No data available for the specified parameters.")
+            break
+
+        # Check if we received less than 5000 records, indicating the last page
+        if len(data['response']['data']) < 5000:
+            break
+
+        # Increase the offset to fetch the next set of data
+        params['offset'] = str(int(params['offset']) + 5000)
+
+    return all_data
+
+# Function to process and aggregate data by week of year (exact reporting date)
+def process_data(data, start_date):
+    # Convert data to DataFrame
+    df = pd.DataFrame(data)
+
+    # Ensure 'period' column exists and convert to datetime
+    if 'period' in df.columns:
+        df['period'] = pd.to_datetime(df['period'], errors='coerce')  # Handle invalid dates
+    else:
+        print("The 'period' column is missing.")
+        return pd.DataFrame()
+
+    # Filter data to include from the specified start date
+    df = df[df['period'] >= start_date]
+
+    # Drop rows with NaN values in 'period' after conversion
+    df = df.dropna(subset=['period'])
+
+    # Ensure 'value' is numeric
+    df['value'] = pd.to_numeric(df['value'], errors='coerce')
+
+    # Drop rows with NaN 'value'
+    df = df.dropna(subset=['value'])
+
+    # Sort by period to ensure the latest value is captured
+    df = df.sort_values(by='period')
+
+    # Extract the week number and year
+    df['week_of_year'] = df['period'].dt.isocalendar().week  # Get ISO week number
+    df['year'] = df['period'].dt.year.astype(int)  # Ensure year is an integer
+
+    # Debugging: Check if the week_of_year and year columns have the expected values
+    print("Unique weeks in the data:", df['week_of_year'].unique())
+    print("Unique years in the data:", df['year'].unique())
+
+    # Pivot data to have weeks as index and years as columns
+    try:
+        data_pivot = df.pivot(index='week_of_year', columns='year', values='value')
+    except KeyError as e:
+        print(f"Pivot failed with KeyError: {e}")
+        return pd.DataFrame()
+
+    # Remove zero values for cleaner plotting
+    data_pivot = data_pivot[data_pivot > 0].dropna(how='all')
+
+    return data_pivot
+
+# Replace 'months' with actual report days for table header
+def format_table_headers(pivot_data):
+    return [day for day in pivot_data.index]
+
+# Format table data for display
+def format_table_data(pivot_data):
+    return [[f'{v:.2f}' if pd.notna(v) else '' for v in pivot_data[col]] for col in pivot_data.columns]
+
+# Fetch data for Crude Oil, Total Gasoline, Ethanol, Distillate, and Residual Fuel ending stocks 
+start_date = '2022-01-01'
+end_date = datetime.now().strftime('%Y-%m-%d')
+
+crude_data = fetch_stocks(api_key, url, start_date, end_date, 'SAX', 'EPC0', 'NUS')  # Crude Oil
+gasoline_data = fetch_stocks(api_key, url, start_date, end_date, 'SAE', 'EPM0', 'NUS')  # Gasoline
+distillate_data = fetch_stocks(api_key, url, start_date, end_date, 'SAE', 'EPD0', 'NUS')  # Distillate
+ethanol_data = fetch_stocks(api_key, url, start_date, end_date, 'SAE', 'EPOOXE', 'NUS')  # Ethanol
+resid_data = fetch_stocks(api_key, url, start_date, end_date, 'SAE', 'EPPR', 'NUS')  # Resid 
+
+# Process data for each product
+crude_pivot = process_data(crude_data, start_date)
+gasoline_pivot = process_data(gasoline_data, start_date)
+distillate_pivot = process_data(distillate_data, start_date)
+ethanol_pivot = process_data(ethanol_data, start_date)
+resid_pivot = process_data(resid_data, start_date)
+
+# Create subplots with 5 rows for graphs and 5 for tables
+fig = make_subplots(
+    rows=10, 
+    cols=1, 
+    subplot_titles=(
+        'Crude Stocks', 'Gasoline Stocks', 'Distillate Stocks', 'Ethanol Stocks', 'Resid Stocks', 
+        'Crude Stocks Table', 'Gasoline Stocks Table', 'Distillate Stocks Table', 'Ethanol Stocks Table', 'Resid Stocks Table'
+    ),
+    specs=[
+        [{"type": "xy"}], [{"type": "xy"}], [{"type": "xy"}], [{"type": "xy"}], [{"type": "xy"}], 
+        [{"type": "table"}], [{"type": "table"}], [{"type": "table"}], [{"type": "table"}], [{"type": "table"}]
+    ],
+    vertical_spacing=0.05
+)
+
+# Plot data for each product
+# Plot Crude Stocks
+for year in crude_pivot.columns:
+    fig.add_trace(go.Scatter(x=crude_pivot.index, y=crude_pivot[year], mode='lines+markers', name=f'Crude Stocks {year}'),
+                  row=1, col=1)
+
+# Plot Gasoline Stocks
+for year in gasoline_pivot.columns:
+    fig.add_trace(go.Scatter(x=gasoline_pivot.index, y=gasoline_pivot[year], mode='lines+markers', name=f'Gasoline Stocks {year}'),
+                  row=2, col=1)
+
+# Plot Distillate Stocks
+for year in distillate_pivot.columns:
+    fig.add_trace(go.Scatter(x=distillate_pivot.index, y=distillate_pivot[year], mode='lines+markers', name=f'Distillate Stocks {year}'),
+                  row=3, col=1)
+
+# Plot Ethanol Stocks
+for year in ethanol_pivot.columns:
+    fig.add_trace(go.Scatter(x=ethanol_pivot.index, y=ethanol_pivot[year], mode='lines+markers', name=f'Ethanol Stocks {year}'),
+                  row=4, col=1)
+
+# Plot Resid Stocks
+for year in resid_pivot.columns:
+    fig.add_trace(go.Scatter(x=resid_pivot.index, y=resid_pivot[year], mode='lines+markers', name=f'Resid Stocks {year}'),
+                  row=5, col=1)
+
+# Plot Tables
+# Add tables for Crude Stocks
+fig.add_trace(go.Table(
+    header=dict(
+        values=["Week of the Year"] + [str(year) for year in crude_pivot.columns],
+        align='center',
+        font=dict(size=12, color='black'),
+        fill_color='lightgrey'
+    ),
+    cells=dict(
+        values=[format_table_headers(crude_pivot)] + format_table_data(crude_pivot),
+        align='center',
+        font=dict(size=11),
+        fill_color='white'
+    )),
+    row=6, col=1
+)
+
+# Add tables for Gasoline Stocks
+fig.add_trace(go.Table(
+    header=dict(
+        values=["Week of the Year"] + [str(year) for year in gasoline_pivot.columns],
+        align='center',
+        font=dict(size=12, color='black'),
+        fill_color='lightgrey'
+    ),
+    cells=dict(
+        values=[format_table_headers(gasoline_pivot)] + format_table_data(gasoline_pivot),
+        align='center',
+        font=dict(size=11),
+        fill_color='white'
+    )),
+    row=7, col=1
+)
+
+# Add tables for Distillate Stocks
+fig.add_trace(go.Table(
+    header=dict(
+        values=["Week of the Year"] + [str(year) for year in distillate_pivot.columns],
+        align='center',
+        font=dict(size=12, color='black'),
+        fill_color='lightgrey'
+    ),
+    cells=dict(
+        values=[format_table_headers(distillate_pivot)] + format_table_data(distillate_pivot),
+        align='center',
+        font=dict(size=11),
+        fill_color='white'
+    )),
+    row=8, col=1
+)
+
+# Add tables for Ethanol Stocks
+fig.add_trace(go.Table(
+    header=dict(
+        values=["Week of the Year"] + [str(year) for year in ethanol_pivot.columns],
+        align='center',
+        font=dict(size=12, color='black'),
+        fill_color='lightgrey'
+    ),
+    cells=dict(
+        values=[format_table_headers(ethanol_pivot)] + format_table_data(ethanol_pivot),
+        align='center',
+        font=dict(size=11),
+        fill_color='white'
+    )),
+    row=9, col=1
+)
+
+# Add tables for Resid Stocks
+fig.add_trace(go.Table(
+    header=dict(
+        values=["Week of the Year"] + [str(year) for year in resid_pivot.columns],
+        align='center',
+        font=dict(size=12, color='black'),
+        fill_color='lightgrey'
+    ),
+    cells=dict(
+        values=[format_table_headers(resid_pivot)] + format_table_data(resid_pivot),
+        align='center',
+        font=dict(size=11),
+        fill_color='white'
+    )),
+    row=10, col=1
+)
+
+# Update layout
+fig.update_layout(height=1800, width=800, title_text="US Stocks Crude, Gasoline, Distillate, Ethanol, and Resid")
+
+# Show plot
+fig.show()
+
+# Ensure directory exists before saving files
+output_dir = r'C:\Users\Angela.Gibson\Desktop\MyPlots'
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+
+# Save the chart as an HTML file
+fig.write_html(os.path.join(output_dir, 'EIA_USA_Stocks.html'))
